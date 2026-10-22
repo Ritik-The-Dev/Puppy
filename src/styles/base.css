@@ -1,0 +1,48 @@
+/* Font variable bridge: the original site injects these via next/font classes. */
+:root {
+  --font-fraunces: 'Fraunces';
+  --font-figtree: 'Figtree';
+  --font-shantell: 'Shantell Sans';
+}
+
+/* Little extras the live walker relies on that live in its JS bundle there. */
+.pup-layer .pup-actor {
+  z-index: 2;
+}
+
+.pup-hearts {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.pup-heart {
+  position: absolute;
+  color: var(--color-toffee-deep, #a24a1a);
+  font-size: 1.15rem;
+  line-height: 1;
+  opacity: 0;
+  animation: pup-heart-float 1.4s ease-out forwards;
+}
+
+@keyframes pup-heart-float {
+  0% {
+    opacity: 0;
+    transform: translateY(6px) scale(0.5);
+  }
+  18% {
+    opacity: 1;
+    transform: translateY(-4px) scale(1.1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-46px) scale(0.85);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pup-heart {
+    animation: none;
+  }
+}

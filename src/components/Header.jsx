@@ -1,0 +1,96 @@
+/* Sticky site header with scroll states, desktop nav and mobile menu dialog. */
+import { useEffect, useRef, useState } from 'react'
+import hemSvg from '../assets/svg/hem.svg?raw'
+import pawSvg from '../assets/svg/paw.svg?raw'
+import pawMenuSvg from '../assets/svg/paw-menu.svg?raw'
+import Svg from './Svg'
+import { NAV_LINKS, WA_LINK, PHONE_TEL } from '../data'
+
+export default function Header({ active = '' }) {
+  const [scrolled, setScrolled] = useState(false)
+  const [hidden, setHidden] = useState(false)
+  const dialogRef = useRef(null)
+
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 8)
+    onScroll()
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
+
+  /* The walking pup drives the navbar: heading right tucks it away, turning
+     back to the left brings it down again. */
+  useEffect(() => {
+    const root = document.documentElement
+    const sync = () => setHidden(root.dataset.pupFacing === 'right')
+    sync()
+    const observer = new MutationObserver(sync)
+    observer.observe(root, { attributes: true, attributeFilter: ['data-pup-facing'] })
+    return () => observer.disconnect()
+  }, [])
+
+  const openMenu = () => dialogRef.current?.showModal()
+  const closeMenu = () => {
+    const d = dialogRef.current
+    if (!d) return
+    d.dataset.closing = ''
+    const done = () => { delete d.dataset.closing; d.close() }
+    d.addEventListener('animationend', done, { once: true })
+    setTimeout(done, 500)
+  }
+
+  return (
+    <header id="site-header" data-scrolled={scrolled} data-hidden={hidden} data-home={active === '' ? 'true' : 'false'} className="tp-header fixed inset-x-0 top-0 z-50">
+      <div className="tp-header__bar gutter">
+        <a className="tp-header__brand" aria-label="TeddyPups U.A.E. — home" href="/">
+          <img alt="" width="56" height="56" className="tp-header__logo" src="/brand/logo.png" />
+          <span className="font-plush tp-header__name">TeddyPups</span>
+        </a>
+        <nav aria-label="Main" className="tp-header__nav">
+          <ul>
+            {NAV_LINKS.map((l) => (
+              <li key={l.label}>
+                <a aria-current={l.href === active ? 'page' : undefined} data-active={l.href === active} className="tp-nav-link" href={l.href}>
+                  <span>{l.label}</span>
+                  <Svg src={pawSvg} className="tp-nav-link__paw" />
+                </a>
+              </li>
+            ))}
+          </ul>
+        </nav>
+        <div className="tp-header__end">
+          <a href={WA_LINK} target="_blank" rel="noopener noreferrer" className="btn btn-whatsapp tp-header__wa">WhatsApp us</a>
+          <button type="button" className="inline-flex h-10 items-center gap-2 rounded-full border-2 border-cocoa bg-milk px-4 text-[0.95rem] font-semibold lg:hidden" aria-haspopup="dialog" onClick={openMenu}>
+            <Svg src={pawMenuSvg} className="size-4" />
+            Menu
+          </button>
+          <dialog aria-label="Site menu" className="tp-menu m-0 h-dvh max-h-none w-screen max-w-none bg-honey p-0 text-cocoa backdrop:bg-cocoa/40" ref={dialogRef}>
+            <div className="flex h-full flex-col gutter pb-[calc(1.5rem+env(safe-area-inset-bottom))] pt-5">
+              <div className="flex items-center justify-between">
+                <span className="font-scrawl text-lg">where to, friend?</span>
+                <button type="button" className="h-11 rounded-full bg-cocoa px-5 font-semibold text-milk" onClick={closeMenu}>Close</button>
+              </div>
+              <nav aria-label="Mobile" className="mt-10 flex-1">
+                <ul className="space-y-1">
+                  {NAV_LINKS.map((l) => (
+                    <li key={l.label}>
+                      <a aria-current={l.href === active ? 'page' : undefined} data-active={l.href === active} className="tp-menu-link font-plush block py-2 text-[clamp(2.4rem,11vw,3.4rem)]" href={l.href} onClick={closeMenu}>
+                        <span>{l.label}</span>
+                        <Svg src={pawSvg} className="tp-nav-link__paw" />
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </nav>
+              <div className="space-y-3">
+                <a href={WA_LINK} className="btn btn-whatsapp w-full" target="_blank" rel="noopener noreferrer">WhatsApp us</a>
+                <p className="text-center text-sm font-medium">+971 54 167 6733</p>
+              </div>
+            </div>
+          </dialog>
+        </div>
+      </div>
+      <Svg src={hemSvg} className="tp-header__hem" />
+    </header>
+  )
+}
