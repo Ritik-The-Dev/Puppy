@@ -72,6 +72,9 @@ function resolve(pathname) {
 
 export default function App() {
   const { active, node, title } = resolve(window.location.pathname)
+  /* The travelling rig only exists on the home page in the original site.
+     Inner pages keep the static pup sitting in the footer basket. */
+  const home = node.type === HomePage
   useReveal()
 
   useEffect(() => {
@@ -92,7 +95,7 @@ export default function App() {
       <Header active={active} />
       <main id="main" tabIndex={-1} className="relative pt-[var(--header-h)] outline-none">
         {node}
-        <PupWalker />
+        {home && <PupWalker />}
         <PupIdle />
       </main>
       <Footer />

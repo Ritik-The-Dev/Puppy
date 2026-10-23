@@ -1,5 +1,6 @@
 /* Ambient life for statically rendered puppets: breathing, tail wag, blinks,
-   head tilts and the occasional speech bubble above their heads. */
+   and the original nine-second idle act (a "hm?" head tilt or a wag pulse).
+   They only speak when clicked, exactly like the live site. */
 import { useEffect } from 'react'
 import { POSES, computeFrame } from './mascot'
 import { applyFrame } from './rig'
@@ -38,10 +39,12 @@ export default function PupIdle() {
           seed: Math.random() * 10,
           nextBlink: performance.now() / 1000 + 1 + Math.random() * 4,
           blinkUntil: 0,
-          nextTalk: performance.now() / 1000 + 2 + Math.random() * 6,
           bubbleUntil: 0,
-          line: Math.floor(Math.random() * LINES.length),
-          nextTilt: performance.now() / 1000 + 4 + Math.random() * 5,
+          queue: [],
+          lastAct: performance.now() / 1000,
+          headCock: 0,
+          headCockTarget: 0,
+          wagBoostUntil: 0,
           tilt: 0,
           tiltUntil: 0,
           hop: 0,
@@ -56,10 +59,15 @@ export default function PupIdle() {
         p.bubble.dataset.show = 'true'
         p.bubbleUntil = performance.now() / 1000 + 1.9
       }
+      const now = performance.now() / 1000
       p.hop = 1
       p.motion.wag = 1
       p.tilt = (Math.random() < 0.5 ? -1 : 1) * (3 + Math.random() * 4)
-      p.tiltUntil = performance.now() / 1000 + 1.1
+      p.tiltUntil = now + 1.1
+      p.lastAct = now
+      p.queue = []
+      p.headCockTarget = 0
+      p.wagBoostUntil = 0
     }
     for (const p of puppets) p.svg.addEventListener('click', () => onClick(p))
 
@@ -76,7 +84,7 @@ export default function PupIdle() {
         const m = p.motion
         m.time = time
         m.phase += dt * 1.25
-        m.wag += (0.65 - m.wag) * Math.min(1, dt * 1.5)
+        m.wag += ((p.wagBoostUntil > time ? 1 : 0.65) - m.wag) * Math.min(1, dt * 1.5)
         m.gazeX += (Math.sin(time * 0.45 + p.seed) * 0.4 - m.gazeX) * Math.min(1, dt * 3)
         m.gazeY += (Math.sin(time * 0.31 + p.seed * 2) * 0.22 - m.gazeY) * Math.min(1, dt * 3)
 
@@ -86,28 +94,42 @@ export default function PupIdle() {
         }
         m.blink = time < p.blinkUntil ? 1 : 0
 
-        if (p.bubble) {
-          if (time > p.nextTalk) {
-            p.nextTalk = time + 7 + Math.random() * 5
-            p.bubble.textContent = LINES[p.line++ % LINES.length]
-            p.bubble.dataset.show = 'true'
-            p.bubbleUntil = time + 1.9
+        while (p.queue.length && p.queue[0][0] <= time) p.queue.shift()[1]()
+        p.headCock += (p.headCockTarget - p.headCock) * Math.min(1, dt / 0.18)
+
+        /* The original waits nine quiet seconds, then either cocks its head
+           ("hm?") or gives a short wag. No unprompted chatter. */
+        if (!p.queue.length && time - p.lastAct > 9) {
+          p.lastAct = time
+          if (Math.random() < 0.55) {
+            p.headCockTarget = -14
+            if (p.bubble) {
+              p.bubble.textContent = 'hm?'
+              p.bubble.dataset.show = 'true'
+              p.bubbleUntil = time + 1.4
+            }
+            p.queue.push(
+              [time + 0.8, () => { p.headCockTarget = 12 }],
+              [time + 1.6, () => { p.headCockTarget = 0 }]
+            )
+          } else {
+            p.wagBoostUntil = time + 2.4
+            p.queue.push([time + 2.4, () => { p.wagBoostUntil = 0 }])
           }
-          if (p.bubble.dataset.show === 'true' && time > p.bubbleUntil) p.bubble.dataset.show = 'false'
         }
 
-        if (time > p.nextTilt) {
-          p.tilt = (Math.random() < 0.5 ? -1 : 1) * (3 + Math.random() * 4)
-          p.tiltUntil = time + 1.1 + Math.random() * 0.6
-          p.nextTilt = time + 6 + Math.random() * 5
+        if (p.bubble && p.bubble.dataset.show === 'true' && time > p.bubbleUntil) {
+          p.bubble.dataset.show = 'false'
         }
+
         if (p.tilt && time > p.tiltUntil) p.tilt = 0
 
         const computed = computeFrame(p.pose, m)
         applyFrame(p.svg, computed, p.facing)
-        if (p.tilt) {
+        const cock = p.headCock + p.tilt
+        if (Math.abs(cock) > 0.01) {
           const head = p.svg.querySelector('g[data-p="head"]')
-          if (head) head.setAttribute('transform', `${computed.head} rotate(${p.tilt.toFixed(2)} 212 100)`)
+          if (head) head.setAttribute('transform', `${computed.head} rotate(${cock.toFixed(2)} 212 100)`)
         }
 
         if (p.hop > 0) {

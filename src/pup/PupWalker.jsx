@@ -19,10 +19,11 @@ const BOXES = {
   bow: [58, 56, 292, 236],
 }
 const SINK = D.y - 159
-const DESKTOP_HOLD = [0.6, 0.86]
-const MOBILE_HOLD = [0.42, 0.78]
+/* Rest bands as fractions of the safe viewport. The phone "lane" and the
+   page stops use different bands in the original site. */
+const LANE_HOLD = [0.6, 0.86]
+const PAGE_HOLD = [0.42, 0.78]
 const REACTIONS = ['jump', 'woof', 'love', 'sneeze']
-const LINES = ['woof!', 'pats please', "i'm friendly", 'hello!', 'sniff sniff', 'best day ever', 'wanna play?']
 
 const clamp01 = (v) => Math.min(1, Math.max(0, v))
 const smooth = (t) => t * t * (3 - 2 * t)
@@ -41,7 +42,17 @@ function holdAt(holds, g) {
   return { k: holds.length - 1, t: 0 }
 }
 
-function clampBox(x, y, box, safe, s) {
+/* The live site eases the mascot away from the edges with a soft clamp
+   (log-sum-exp) instead of a hard stop. Matching it keeps the phone lane
+   positions identical to the original. */
+const softMax = (v, edge, s = 8) => {
+  const d = (v - edge) / s
+  return d > 20 ? v : edge + s * Math.log1p(Math.exp(d))
+}
+const softMin = (v, edge, s = 8) => -softMax(-v, -edge, s)
+const softClamp = (v, lo, hi) => (lo > hi ? (lo + hi) / 2 : softMin(softMax(v, lo), hi))
+
+function clampBox(x, y, box, safe, s, soft = false) {
   const left = (D.x - box[0]) * s
   const right = (box[2] - D.x) * s
   const top = (D.y - box[1]) * s
@@ -49,12 +60,16 @@ function clampBox(x, y, box, safe, s) {
   let nx = x
   let ny = y
   if (safe.right - safe.left > left + right) {
-    nx = Math.min(Math.max(x, safe.left + left), safe.right - right)
+    nx = soft
+      ? softClamp(x, safe.left + left, safe.right - right)
+      : Math.min(Math.max(x, safe.left + left), safe.right - right)
   } else {
     nx = (safe.left + safe.right) / 2 - (right - left) / 2
   }
   if (safe.bottom - safe.top > top + bottom) {
-    ny = Math.min(Math.max(y, safe.top + top), safe.bottom - bottom)
+    ny = soft
+      ? softClamp(y, safe.top + top, safe.bottom - bottom)
+      : Math.min(Math.max(y, safe.top + top), safe.bottom - bottom)
   } else {
     ny = safe.bottom - bottom
   }
@@ -86,6 +101,7 @@ function bezierArc(p0, c1, c2, p1, t) {
 }
 
 export default function PupWalker() {
+  const probeRef = useRef(null)
   const layerRef = useRef(null)
   const actorRef = useRef(null)
   const bodyRef = useRef(null)
@@ -115,6 +131,7 @@ export default function PupWalker() {
     let meta = []
     let holds = []
     let sceneCount = 0
+    let blendPx = 90
 
     const state = {
       x: 0,
@@ -135,6 +152,19 @@ export default function PupWalker() {
       bubbleUntil: 0,
       talkAt: 0,
       lookUntil: 0,
+      ear: 0,
+      earVel: 0,
+      mouthUntil: 0,
+      headCock: 0,
+      headCockTarget: 0,
+      queue: [],
+      restAt: 0,
+      restEnteredK: -1,
+      idleActAt: 0,
+      basketNext: 0,
+      wagBoostUntil: 0,
+      lookIdx: -1,
+      lookNext: 0,
     }
 
     const pose = { ...POSES.sit }
@@ -175,14 +205,18 @@ export default function PupWalker() {
 
     function measure() {
       const ViewW = document.documentElement.clientWidth
-      const ViewH = window.innerHeight
+      /* The original measures the small-viewport-height probe instead of
+         innerHeight: on phones 100svh is shorter than the live viewport while
+         the URL bar is hidden, and every stop is laid out from that number. */
+      const ViewH = probeRef.current?.getBoundingClientRect().height || window.innerHeight
       const headerH = document.getElementById('site-header')?.offsetHeight ?? 76
       const bar = document.querySelector('[data-whatsapp-bar]')
       const barH = bar?.getClientRects().length ? bar.getBoundingClientRect().height : 0
       const safe = { left: 10, top: headerH + 10, right: ViewW - 10, bottom: ViewH - 10 - barH }
       const center = (safe.top + safe.bottom) / 2
       const span = safe.bottom - safe.top
-      const fraction = lane ? MOBILE_HOLD : DESKTOP_HOLD
+      const fraction = lane ? LANE_HOLD : PAGE_HOLD
+      blendPx = 0.12 * ViewH
 
       stops = []
       meta = []
@@ -191,7 +225,7 @@ export default function PupWalker() {
       const push = (stop, info, range) => {
         stops.push(stop)
         meta.push(info)
-        holds.push(range)
+        holds.push(range[0] <= range[1] ? [range[0], range[1]] : [(range[0] + range[1]) / 2, (range[0] + range[1]) / 2])
       }
 
       const place = (el) => {
@@ -253,6 +287,7 @@ export default function PupWalker() {
       if (lane) {
         const laneStops = all.filter((el) => el.dataset.lane === 'true')
         const first = laneStops[0]
+        const lastLane = laneStops.length > 1 ? laneStops[laneStops.length - 1] : null
         if (first) place(first)
         const firstScene = meta[0]?.scene ?? null
         const scenes = [...document.querySelectorAll('#main [data-pup-scene]')].filter(
@@ -267,11 +302,14 @@ export default function PupWalker() {
           const top = rect.top + window.scrollY
           stops.push({ x, track: { kind: 'screen', top: 0 }, s: ds, behind: false, sink: SINK, box })
           meta.push({ scene: el, pose: 'peek', facing: left ? 1 : -1, act: 'lane', looks: [], track: null })
-          const upper = top - 0.42 * span
-          const lower = top + rect.height - 0.58 * span
-          holds.push(upper <= lower ? [upper, lower] : [upper, lower])
+          const upper = top - 0.42 * ViewH
+          const lower = rect.bottom + window.scrollY - 0.58 * ViewH
+          holds.push(upper <= lower ? [upper, lower] : [(upper + lower) / 2, (upper + lower) / 2])
         })
         sceneCount = scenes.length
+        /* The basket in the footer is the final lane stop: the pup walks into
+           it instead of living in the bottom lane forever. */
+        if (lastLane) place(lastLane)
       } else {
         all.forEach(place)
       }
@@ -291,7 +329,7 @@ export default function PupWalker() {
       holds[0][0] = -Infinity
       const lastHold = holds[holds.length - 1]
       lastHold[1] = Infinity
-      lastHold[0] = Math.min(lastHold[0], document.documentElement.scrollHeight - ViewH - 1)
+      lastHold[0] = Math.min(lastHold[0], document.documentElement.scrollHeight - window.innerHeight - 1)
       const blend = lane ? 0.32 : 0.5
       for (let i = 0; i < holds.length - 1; i++) {
         const a = holds[i]
@@ -302,7 +340,19 @@ export default function PupWalker() {
           b[0] = Math.min(b[1], mid)
           if (b[0] < a[1]) b[0] = a[1]
         }
-        const gap = Math.min(1.4 * stops[i].s, Math.max(blend * stops[i].s, 1.15 * Math.hypot(stops[i + 1].x - stops[i].x, span * 0.5)))
+        /* The original sizes the walking stretch from the viewport height and
+           the real horizontal gap between the two resting poses. */
+        const gap = Math.min(
+          1.4 * ViewH,
+          Math.max(
+            blend * ViewH,
+            1.15 *
+              Math.hypot(
+                Math.abs(stops[i + 1].x + D.x * stops[i + 1].s - (stops[i].x + D.x * stops[i].s)),
+                (PAGE_HOLD[1] - PAGE_HOLD[0]) * ViewH
+              )
+          )
+        )
         const needed = gap - (b[0] - a[1])
         if (needed > 0) {
           const takeA = Math.min(needed / 2, a[1] - a[0])
@@ -319,31 +369,31 @@ export default function PupWalker() {
       for (const h of holds) if (h[1] < h[0]) h[1] = h[0]
 
       document.documentElement.dataset.pup = lane ? 'lane' : 'live'
-      layer.dataset.anchor = lane ? 'bottom' : 'top'
+      layer.dataset.anchor = 'top'
       layer.hidden = false
       if (state.restIndex >= 0 && !stops[state.restIndex]) state.restIndex = -1
     }
 
-    const posOf = (stop) => ({
+    const posOf = (stop, at) => ({
       x: stop.x + D.x * stop.s,
       y:
         (stop.track.kind === 'page'
-          ? stop.track.top - window.scrollY
+          ? stop.track.top - at
           : stop.track.kind === 'screen'
             ? stop.track.top
-            : window.scrollY < stop.track.from
-              ? stop.track.top - (window.scrollY - stop.track.from)
-              : window.scrollY > stop.track.to
-                ? stop.track.top - (window.scrollY - stop.track.to)
+            : at < stop.track.from
+              ? stop.track.top - (at - stop.track.from)
+              : at > stop.track.to
+                ? stop.track.top - (at - stop.track.to)
                 : stop.track.top) + D.y * stop.s,
     })
 
     function position(scroll) {
       if (!holds.length) return null
       const { k, t } = holdAt(holds, scroll)
-      if (scroll <= 0 || k >= stops.length - 1) {
-        const p = posOf(stops[k])
-        const safe = clampBox(p.x, p.y, stops[k].box, currentSafe(), stops[k].s)
+      if (t <= 0 || k >= stops.length - 1) {
+        const p = posOf(stops[k], scroll)
+        const safe = clampBox(p.x, p.y, stops[k].box, currentSafe(), stops[k].s, lane)
         return { x: safe.x, y: safe.y, s: stops[k].s, front: !stops[k].behind, airborne: false, k, t: 0, walked: 0 }
       }
       const a = stops[k]
@@ -352,20 +402,28 @@ export default function PupWalker() {
       const to = holds[k + 1][0]
       const spanT = Math.max(1, to - from)
       const v = clamp01((scroll - from) / spanT)
-      const pa = posOf(a)
-      const pb = posOf(b)
+      /* The walking curve is pinned to the hold boundaries, not to wherever
+         the page happens to be, exactly like the original. */
+      const pa = posOf(a, from)
+      const pb = posOf(b, to)
+      const nowA = posOf(a, scroll)
+      const nowB = posOf(b, scroll)
       const safe = currentSafe()
       const dx = pb.x - pa.x
       const width = safe.right - safe.left
       const offset = Math.max(0.45 * Math.abs(dx), 0)
       const dir = dx >= 0 ? 1 : -1
-      let c1 = { x: pa.x + dir * offset, y: pa.y }
-      let c2 = { x: pb.x - dir * offset, y: pb.y }
+      /* The curve is built from the sink-adjusted endpoints, exactly like the
+         original, so all control-point maths start there. */
+      const p0 = { x: pa.x, y: pa.y - a.sink * a.s }
+      const p1 = { x: pb.x, y: pb.y - b.sink * b.s }
+      let c1 = { x: p0.x + dir * offset, y: p0.y }
+      let c2 = { x: p1.x - dir * offset, y: p1.y }
       const radius = 0.14 * width
       if (Math.abs(dx) < radius) {
         const nudge = ((pa.x + pb.x) / 2 < (safe.left + safe.right) / 2 ? 1 : -1) * (radius - Math.abs(dx)) * 0.9
-        c1 = { x: c1.x + nudge, y: lerp(pa.y, pb.y, 0.2) }
-        c2 = { x: c2.x + nudge, y: lerp(pa.y, pb.y, 0.8) }
+        c1 = { x: c1.x + nudge, y: lerp(p0.y, p1.y, 0.2) }
+        c2 = { x: c2.x + nudge, y: lerp(p0.y, p1.y, 0.8) }
       }
       const clip = (p) => ({
         x: Math.min(safe.right, Math.max(safe.left, p.x)),
@@ -373,15 +431,13 @@ export default function PupWalker() {
       })
       const c1c = clip(c1)
       const c2c = clip(c2)
-      const p0 = { x: pa.x, y: pa.y - a.sink * a.s }
-      const p1 = { x: pb.x, y: pb.y - b.sink * b.s }
       const eased = v * v * v * (v * (6 * v - 15) + 10)
       const point = bezier(p0, c1c, c2c, p1, eased)
       const scale = lerp(a.s, b.s, progress(0, 0.65, v))
-      const blendBack = Math.min(0.3, Math.max(0.06, (0.12 * a.s) / spanT))
+      const blendBack = Math.min(0.3, Math.max(0.06, blendPx / spanT))
       const startW = 1 - progress(0, blendBack, v)
       const endW = progress(1 - blendBack, 1, v)
-      let y = point.y + startW * (posOf(a).y - p0.y) + endW * (posOf(b).y - p1.y)
+      let y = point.y + startW * (nowA.y - pa.y) + endW * (nowB.y - pb.y)
       const x = point.x
       y += a.sink * a.s * (1 - progress(0, 0.22, v)) + b.sink * b.s * progress(0.78, 1, v)
       let airborne = false
@@ -395,8 +451,13 @@ export default function PupWalker() {
       }
       if (a.sink && v < 0.2) airborne = true
       const front = !(a.behind && v < 0.12) && !(b.behind && v > 0.92)
-      const box = lerpBox(a.box, b.box, v < 0.5 ? progress(0, a.sink ? 0.22 : a.behind ? 0.36 : 0.06, v) : progress(b.sink ? 0.78 : b.behind ? 0.68 : 0.94, 1, v))
-      const hit = clampBox(x, y, box, safe, scale)
+      /* Halfway through a walk the original uses the default box, so the
+         clamp bounds relax in the middle of the step. */
+      const box =
+        v < 0.5
+          ? lerpBox(a.box, DEFAULT_BOX, progress(0, a.sink ? 0.22 : a.behind ? 0.36 : 0.06, v))
+          : lerpBox(DEFAULT_BOX, b.box, progress(b.sink ? 0.78 : b.behind ? 0.68 : 0.94, 1, v))
+      const hit = clampBox(x, y, box, safe, scale, lane)
       return {
         x: hit.x,
         y: hit.y,
@@ -413,12 +474,21 @@ export default function PupWalker() {
       return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t), lerp(a[3], b[3], t)]
     }
 
+    /* Top edge of the mobile action bar, or the bottom of the viewport when
+       it is not rendered. */
+    function barTop() {
+      const bar = document.querySelector('[data-whatsapp-bar]')
+      const rect = bar?.getClientRects().length ? bar.getBoundingClientRect() : null
+      return rect?.height ? rect.top : window.innerHeight - 6
+    }
+
     function currentSafe() {
       const ViewW = document.documentElement.clientWidth
-      const headerH = document.getElementById('site-header')?.offsetHeight ?? 76
+      const top = (document.getElementById('site-header')?.offsetHeight ?? 76) + 10
+      if (lane) return { left: 10, top, right: ViewW - 10, bottom: barTop() + 40 }
       const bar = document.querySelector('[data-whatsapp-bar]')
-      const barH = bar?.getClientRects().length ? bar.getBoundingClientRect().height : 0
-      return { left: 10, top: headerH + 10, right: ViewW - 10, bottom: window.innerHeight - 10 - barH }
+      const bottom = bar?.getClientRects().length ? bar.getBoundingClientRect().top : window.innerHeight
+      return { left: 10, top, right: ViewW - 10, bottom: Math.min(window.innerHeight, bottom) - 10 }
     }
 
     function snapScroll(scroll) {
@@ -478,15 +548,27 @@ export default function PupWalker() {
         love: ['I like you!'],
         sneeze: ['achoo!'],
       }[name]
-      if (name === 'jump') hop = 1.35
-      else if (name === 'love') {
+      const nowS = performance.now() / 1000
+      if (name === 'jump') {
+        hop = 1.35
+        state.earVel += 220
+      } else if (name === 'love') {
         hop = 0.5
         hearts = 1
         state.wag = 1
+        state.earVel += 100
         if (current) heartsBurst(current)
-      } else if (name === 'sneeze') hop = 0.4
-      else hop = 0.3
-      state.actionUntil = performance.now() / 1000 + 0.9
+      } else if (name === 'sneeze') {
+        hop = 0.4
+        state.headCockTarget = 10
+        state.earVel += 378
+        state.mouthUntil = nowS + 0.22
+      } else {
+        hop = 0.3
+        state.earVel += 260
+        state.mouthUntil = nowS + 0.34
+      }
+      state.actionUntil = nowS + 0.9
       say(bubble[Math.floor(Math.random() * bubble.length)])
     }
 
@@ -515,10 +597,14 @@ export default function PupWalker() {
     let last = performance.now() / 1000
     let lastScroll = window.scrollY
     let lastMoveAt = last
-    let prevX = null
-    let prevY = null
     let trackLeft = null
     let greeted = false
+    let scrollDir = 1
+    let smooth = null
+    let offset = { x: 0, y: 0 }
+    let renderPos = null
+    let prevBarTop = 0
+    let stillFor = 0
 
     actor.addEventListener('click', onClick)
     window.addEventListener('pointermove', onPointerMove, { passive: true })
@@ -533,17 +619,18 @@ export default function PupWalker() {
       const t = now / 1000
       const dt = Math.min(0.05, Math.max(0.001, t - last))
       last = t
+      while (state.queue.length && state.queue[0][0] <= t) state.queue.shift()[1]()
 
       const scroll = window.scrollY
       const scrolled = Math.abs(scroll - lastScroll) > 0.5
       if (scrolled) {
+        scrollDir = scroll > lastScroll ? 1 : -1
         lastMoveAt = t
         lastScroll = scroll
       }
+      const bar = lane ? barTop() : 0
       if (lane) {
-        const bar = document.querySelector('[data-whatsapp-bar]')
-        const barTop = bar?.getClientRects().length ? bar.getBoundingClientRect().top : window.innerHeight - 6
-        for (const st of stops) if (st.track.kind === 'screen') st.track.top = barTop - 159 * st.s
+        for (const st of stops) if (st.track.kind === 'screen') st.track.top = bar - 159 * st.s
       }
       const idle = t * 1000 - lastMoveAt * 1000 > 250
       const target = idle ? snapScroll(scroll) : scroll
@@ -553,8 +640,46 @@ export default function PupWalker() {
         return
       }
 
+      /* Small spring that catches up after the anchored lane lets go, so the
+         pup settles back into the page instead of snapping. */
+      const decay = Math.exp(-dt / 0.28)
+      offset.x *= decay
+      offset.y *= decay
+      if (Math.abs(offset.x) < 0.05 && Math.abs(offset.y) < 0.05) offset.x = offset.y = 0
+
+      /* Between two scene stops the layer is pinned to the bottom of the
+         viewport and the pup is measured from the action bar, exactly like the
+         original. The layer is 100lvh tall there, so its own top is removed. */
+      let anchored = false
+      if (lane) {
+        const sa = stops[v.k]
+        const sb = v.t > 0 ? stops[v.k + 1] : sa
+        anchored = sa?.track.kind === 'screen' && sb?.track.kind === 'screen'
+      }
+      let dispX
+      let dispY
+      let settled = true
+      if (anchored) {
+        if (!smooth) smooth = renderPos ? { x: renderPos.x, y: renderPos.y - prevBarTop } : { x: v.x, y: v.y - bar }
+        const follow = 1 - Math.exp(-dt / 0.14)
+        smooth.x += (v.x - smooth.x) * follow
+        smooth.y += (v.y - bar - smooth.y) * follow
+        settled = Math.hypot(v.x - smooth.x, v.y - bar - smooth.y) < 1.5
+        dispX = smooth.x
+        dispY = bar + smooth.y
+      } else {
+        if (smooth) {
+          offset.x = (renderPos?.x ?? v.x) - v.x
+          offset.y = (renderPos?.y ?? v.y) - v.y
+          smooth = null
+        }
+        dispX = v.x + offset.x
+        dispY = v.y + offset.y
+      }
+      prevBarTop = bar
+
       // ---- rest / walk state ----
-      const resting = v.t === 0 && !v.airborne
+      const resting = v.t === 0 && settled
       if (v.k !== state.restIndex) {
         state.restIndex = v.k
         state.walked = 0
@@ -576,6 +701,21 @@ export default function PupWalker() {
         }
         state.stride += (0 - state.stride) * Math.min(1, dt * 10)
         state.restIndex = v.k
+        /* Entering a rest resets the idle act queue and gives the ears the
+           same little jolt the original rig applies. */
+        if (state.restEnteredK !== v.k) {
+          state.restEnteredK = v.k
+          state.restAt = t
+          state.basketNext = t + 2.4
+          state.lookIdx = -1
+          state.lookNext = t
+          state.queue = []
+          state.earVel += 88
+          state.headCockTarget = 0
+          if (!info.track) {
+            state.wag = info.act === 'basket' ? 0.3 : 0.7
+          }
+        }
         // treadmill: walk in place while the door wall slides
         if (info.track) {
           const left = info.track.getBoundingClientRect().left
@@ -601,42 +741,82 @@ export default function PupWalker() {
           state.wag = 0.7
         } else {
           trackLeft = null
-          state.wag = info.act === 'basket' ? 0.3 : 0.7
-          if (info.act === 'tilt') {
-            state.headTilt = Math.sin(t * 0.9) > 0.35 ? 13 : Math.sin(t * 0.9) < -0.35 ? -10 : 0
+          state.wag = info.act === 'basket' ? 0.3 : t < state.wagBoostUntil ? 1 : 0.7
+          /* The reference scene marked "tilt" keeps cocking its head in a
+             slow sine once it has settled. */
+          if (info.act === 'tilt' && t - state.restAt > 1.2) {
+            state.headCockTarget = Math.sin(t * 0.9) > 0.35 ? 13 : Math.sin(t * 0.9) < -0.35 ? -10 : 0
           }
-          if (idle) {
-            if (!state.nextTalk) state.nextTalk = t + 5 + Math.random() * 3
-            if (t > state.nextTalk) {
-              state.nextTalk = t + 6 + Math.random() * 3
-              say(LINES[Math.floor(Math.random() * LINES.length)], 1.8)
+          /* In the basket it jolts or yawns every few seconds, silently. */
+          if (info.act === 'basket' && t > state.basketNext) {
+            state.basketNext = t + 4.5 + Math.random() * 3
+            if (Math.random() < 0.7) state.earVel += 121
+            else state.mouthUntil = t + 0.7
+          }
+          /* After nine quiet seconds: a head-tilt ("hm?") or a tail wag. */
+          if (
+            info.act !== 'basket' &&
+            t - Math.max(lastMoveAt, state.restAt, state.idleActAt) > 9 &&
+            !state.queue.length
+          ) {
+            state.idleActAt = t
+            if (Math.random() < 0.55) {
+              state.headCockTarget = -14
+              say('hm?')
+              state.queue.push(
+                [t + 0.8, () => { state.headCockTarget = 12 }],
+                [t + 1.6, () => { state.headCockTarget = 0 }]
+              )
+            } else {
+              state.wagBoostUntil = t + 2.4
+              state.queue.push([t + 2.4, () => { state.wagBoostUntil = 0 }])
             }
-            if (!state.nextAntic) state.nextAntic = t + 9 + Math.random() * 4
-            if (t > state.nextAntic) {
-              state.nextAntic = t + 9 + Math.random() * 4
-              if (Math.random() < 0.5) react(Math.random() < 0.5 ? 'woof' : 'love')
-              else state.wag = 1
+          }
+          /* Periodically looks at whatever the scene marks as interesting. */
+          const userLooking = (look && look.until > t) || (mouse && t - mouse.t < 2.5)
+          if (info.looks.length && !userLooking && t - state.restAt > 0.8 && t > state.lookNext) {
+            state.lookNext = t + 1.7
+            state.lookIdx = (state.lookIdx + 1) % (info.looks.length + 1)
+            if (state.lookIdx < info.looks.length) {
+              look = { el: info.looks[state.lookIdx], until: t + 1.4 }
             }
           }
         }
       } else {
         trackLeft = null
-        setPose(v.airborne ? 'hop' : 'walk')
-        if (v.airborne) {
+        /* In the lane a hop only happens while the page scrolls towards the
+           pup's next stop; otherwise it trots or stands still. */
+        let airborne = v.airborne
+        if (lane && v.t > 0) {
+          const sa = stops[v.k]
+          const sb = stops[v.k + 1]
+          if (sa?.sink && v.t < 0.22) airborne = scrollDir > 0
+          else if (sb?.sink && v.t > 0.78) airborne = scrollDir < 0
+        }
+        const dxd = renderPos ? dispX - renderPos.x : 0
+        const dyd = renderPos ? dispY - renderPos.y : 0
+        if (lane) stillFor = Math.hypot(dxd, dyd) > 0.25 ? 0 : stillFor + dt
+        if (airborne) {
+          setPose('hop')
           state.stride += (0 - state.stride) * Math.min(1, dt * 12)
+        } else if (lane && stillFor > 0.3) {
+          setPose('stand')
+          state.stride += (0 - state.stride) * Math.min(1, dt * 10)
+          if (stillFor > 2.6 && stillFor - dt <= 2.6) say('coming?', 1.6)
         } else {
+          setPose('walk')
           state.stride = 1
         }
-        if (prevX !== null && Math.abs(v.x - prevX) > 0.6 && Math.abs(v.x - prevX) > 0.35 * Math.abs(v.y - prevY)) {
-          facing = v.x > prevX ? 1 : -1
+        if (renderPos && Math.abs(dxd) > 0.6 && Math.abs(dxd) > 0.35 * Math.abs(dyd)) {
+          facing = dxd > 0 ? 1 : -1
           heading = facing
-        } else if (prevX !== null) {
+        } else if (renderPos) {
           facing = state.facing
         }
         // paw prints every 34px of travel
         if (!lane) {
           const step = Math.floor(v.walked / (34 * Math.max(0.05, v.s)))
-          if (step !== state.printStep && prevX !== null) {
+          if (step !== state.printStep && renderPos) {
             state.printStep = step
             dropPrint(v, facing)
           }
@@ -666,7 +846,10 @@ export default function PupWalker() {
       const poseFrom = POSES[state.fromPose] || POSES.sit
       const poseTo = POSES[state.toPose] || POSES.sit
       const blended = lerpPose(poseFrom, poseTo, state.poseT)
-      if (state.headTilt) blended.headRot += state.headTilt
+      state.headCock +=
+        (state.headCockTarget + 3 * MOTION.gazeX - state.headCock) * Math.min(1, dt / 0.18)
+      if (Math.abs(state.headCock) > 0.01) blended.headRot += state.headCock
+      if (t < state.mouthUntil) blended.mouth = 1
       if (hop > 0) {
         blended.bodyY -= Math.sin(Math.min(1, hop) * Math.PI) * 22
         blended.bodyRot -= 6
@@ -676,7 +859,10 @@ export default function PupWalker() {
       MOTION.time = t
       MOTION.stride = state.stride
       MOTION.wag = state.wag
-      MOTION.ear = 0
+      /* Ear spring, matching the rig's impulse response. */
+      state.earVel += (-150 * state.ear - 10 * state.earVel) * dt
+      state.ear = Math.max(-28, Math.min(28, state.ear + state.earVel * dt))
+      MOTION.ear = state.ear
       // blink
       if (!state.nextBlink || t > state.nextBlink) {
         state.blinkUntil = t + 0.16
@@ -687,10 +873,13 @@ export default function PupWalker() {
       applyFrame(svg, computed, facing)
 
       // ---- place ----
-      actor.style.transform = `translate3d(${(v.x - D.x * v.s).toFixed(2)}px, ${(v.y - D.y * v.s).toFixed(2)}px, 0)`
+      layer.dataset.anchor = anchored ? 'bottom' : 'top'
+      const layerTop = anchored ? layer.getBoundingClientRect().top : 0
+      actor.style.transform = `translate3d(${(dispX - D.x * v.s).toFixed(2)}px, ${(dispY - D.y * v.s - layerTop).toFixed(2)}px, 0)`
       bodyEl.style.transform = `scale(${v.s.toFixed(4)})`
       layer.dataset.front = String(v.front)
       actor.dataset.holding = String(resting)
+      renderPos = { x: dispX, y: dispY }
 
       // ---- bubble ----
       if (bubbleEl.dataset.show === 'true') {
@@ -718,8 +907,6 @@ export default function PupWalker() {
       }
 
       current = v
-      prevX = v.x
-      prevY = v.y
       raf = requestAnimationFrame(frame)
     }
 
@@ -755,6 +942,7 @@ export default function PupWalker() {
       actor.removeEventListener('click', onClick)
       delete document.documentElement.dataset.pup
       delete document.documentElement.dataset.pupFacing
+      delete layer.dataset.anchor
       layer.hidden = true
     }
 
@@ -763,6 +951,7 @@ export default function PupWalker() {
 
   return (
     <>
+      <div aria-hidden="true" className="pup-probe" ref={probeRef} />
       <div className="pup-layer" ref={layerRef} hidden data-front="true">
         <div aria-hidden="true" className="pup-prints" ref={printsRef}>
           {Array.from({ length: 24 }, (_, i) => (
